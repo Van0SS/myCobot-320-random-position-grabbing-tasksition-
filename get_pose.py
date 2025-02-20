@@ -64,9 +64,9 @@ def main():
 
     if angles == -1 or coords == -1:
         print("[note] if remains -1，")
-        print("       could be other problems")
+        print("could be other problems")
     else:
-        print("[success] 。")
+        print("[success].")
 
 if __name__ == "__main__":
     main()
