@@ -9,10 +9,25 @@ matrix.py is for calculating the Homography Transform
 
 robot control.ipynb is for letting the robot grab the object with random position
 
-Before running:
+## Before the Start:
+### Set up the Wi-Fi Hotspot
+Create a Wi-Fi hotspot with the following SSID and password. Make sure the Wi-Fi band is **2.4G**
+* SSID: **MyCobotWiFi2.4G**
+* password: **mycobot123**
 
-```bash
+### Set up the ```ipconfig.json``` file
+1. Create a folder named as ```env``` under the ```root```.
+2. In the ```env``` folder, create a new JSON file named as ```ipconfig.json```.
+3. In the ```ipconfig.json``` file, type the following information:
+```
+{
+    "ip": "<IP address shown on the MyCobot>",
+    "port": 9000
+}
+```
+
+### Install related python libraries
+```
 pip install pymycobot
-
-
-
+```
+There are other required libraries in the ```requirements.txt``` file.

@@ -6,7 +6,7 @@ Vision-based Follow, Pick & Place Demo
 ----------------------------------------
 流程：
   1. go back to zero, open graper
-  2. using camera to detect blue object（only 2d coordination），calculate coordination based on robot（fixed z=165）。
+  2. using camera to detect a blue object（only 2d coordination），calculate coordination based on robot（fixed z=165）。
      —— cancel all delay when following，to achieve realtime follow，send every five frames
   3. press enter，robot starts grabbing ，go up 50 units（z: 165→215）。
   4. move to pre-defined position，Open graper and place，Then go back to zero。
@@ -15,11 +15,23 @@ Vision-based Follow, Pick & Place Demo
 import cv2
 import numpy as np
 import time
+import json
 from pymycobot import MyCobot320Socket
 
 
-def convert_camera_to_robot(camera_coord, H):
+def getIpConfig():
+    # Open and read the JSON file
+    with open('env/ipconfig.json', 'r') as file:
+        data = json.load(file)
 
+    # read the ip and port info
+    ip_address = data['ip']
+    netport = data['port']
+
+    return ip_address, netport
+
+
+def convert_camera_to_robot(camera_coord, H):
     u, v = camera_coord
     point_h = np.array([u, v, 1.0])
     robot_h = H.dot(point_h)
@@ -28,7 +40,6 @@ def convert_camera_to_robot(camera_coord, H):
 
 
 def follow_blue_object(mc, H, pick_z, pick_orientation, speed):
-
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("Unable to open camera")
@@ -92,9 +103,8 @@ def follow_blue_object(mc, H, pick_z, pick_orientation, speed):
 
 def main():
     # wifi
-    ROBOT_IP = "192.168.43.94"
-    ROBOT_PORT = 9000
 
+    ROBOT_IP, ROBOT_PORT = getIpConfig()
     mc = MyCobot320Socket(ROBOT_IP, ROBOT_PORT)
     time.sleep(1)
     mc.focus_all_servos()

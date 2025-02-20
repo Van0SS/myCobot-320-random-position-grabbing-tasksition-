@@ -12,17 +12,37 @@ Demo of 'release -> manual drag -> focus -> read pose' for MyCobot 320 via Socke
 """
 
 import time
+import json
 from pymycobot import MyCobot320Socket
 
-def main():
-    #---------------------------------------------------
-    # 1) Build WiFi Connection
-    #---------------------------------------------------
-    mc = MyCobot320Socket("192.168.43.94", 9000)
 
-    #---------------------------------------------------
+def getIpConfig():
+    # Open and read the JSON file
+    with open('env/ipconfig.json', 'r') as file:
+        data = json.load(file)
+
+    # read the ip and port info
+    ip_address = data['ip']
+    netport = data['port']
+
+    return ip_address, netport
+
+
+def main():
+    # ---------------------------------------------------
+    # 0) Get the IP and port information
+    # ---------------------------------------------------
+
+    ip_address, netport = getIpConfig()
+
+    # ---------------------------------------------------
+    # 1) Build WiFi Connection
+    # ---------------------------------------------------
+    mc = MyCobot320Socket(ip_address, netport)
+
+    # ---------------------------------------------------
     # 2) Test
-    #---------------------------------------------------
+    # ---------------------------------------------------
     print(">> Test communication: if wrong: -1")
     test_angles = mc.get_angles()
     print("   current angle:", test_angles)
@@ -34,26 +54,26 @@ def main():
 
     time.sleep(1)
 
-    #---------------------------------------------------
+    # ---------------------------------------------------
     # 3) Release control
     #    Different from power_off() ，release_all_servos() stay connected
-    #---------------------------------------------------
+    # ---------------------------------------------------
     print("\n>>  (release_all_servos) ...")
     mc.release_all_servos()
     time.sleep(0.5)
 
     input("Move robot manually，then press enter to continue...")
 
-    #---------------------------------------------------
+    # ---------------------------------------------------
     # 4) focus server again
-    #---------------------------------------------------
+    # ---------------------------------------------------
     print(">>  (focus_all_servos) ...")
     mc.focus_all_servos()
     time.sleep(1)
 
-    #---------------------------------------------------
+    # ---------------------------------------------------
     # 5) Read and prin current coordination
-    #---------------------------------------------------
+    # ---------------------------------------------------
     angles = mc.get_angles()
     coords = mc.get_coords()
 
@@ -67,6 +87,7 @@ def main():
         print("could be other problems")
     else:
         print("[success].")
+
 
 if __name__ == "__main__":
     main()
