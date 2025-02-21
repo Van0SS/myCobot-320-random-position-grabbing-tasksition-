@@ -30,7 +30,7 @@ def main():
 
     home_angles = [0, 0, 0, 0, 0, 0]
     print("\n---> Move to home position:", home_angles)
-    mc.send_angles(home_angles, 30)
+    mc.send_angles(home_angles, 10)
     time.sleep(3)
 
     print("\n---> Close gripper")
