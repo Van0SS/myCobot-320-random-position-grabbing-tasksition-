@@ -3,7 +3,7 @@ import json
 from pymycobot import MyCobot320Socket
 
 
-def getIpConfig():
+def get_ip_config():
     # Open and read the JSON file
     with open('env/ipconfig.json', 'r') as file:
         data = json.load(file)
@@ -17,7 +17,7 @@ def getIpConfig():
 
 def main():
     # config wifi setting
-    ROBOT_IP, ROBOT_PORT = getIpConfig()
+    ROBOT_IP, ROBOT_PORT = get_ip_config()
     mc = MyCobot320Socket(ROBOT_IP, ROBOT_PORT)
     time.sleep(1)
     mc.focus_all_servos()
