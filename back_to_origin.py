@@ -33,6 +33,10 @@ def main():
     mc.send_angles(home_angles, 30)
     time.sleep(3)
 
+    print("\n---> Close gripper")
+    mc.set_gripper_state(1, 100)
+    time.sleep(2)
+
     print("\n---> Open gripper")
     mc.set_gripper_state(0, 100)
     time.sleep(2)
