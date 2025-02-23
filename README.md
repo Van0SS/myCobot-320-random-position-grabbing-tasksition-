@@ -1,6 +1,8 @@
 # myCobot-320-random-position-grabbing-task-YOLOv5s
 Using myCobot-320 to grab an object in the area of camera detection
 
+jog_following is an updated version of following.py, using dual thread, avoided camera lag and slow tracking.
+
 following.py is for lettting the end factor to follow the blue item in the camera.
 
 get_pose.py is for getting the current pose info of the robot, you have to manully move the robot to the Calibration Points.
