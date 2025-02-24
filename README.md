@@ -16,6 +16,12 @@ robot control.ipynb is for letting the robot grab the object with random positio
 
 robot_control_with_Qwen.ipynb is for letting the robot grab objects and move to a random position by your instruction.
 
+jog_follow_new.py is upadated using fresh mode, which will make the process more efficient.
+
+Voice.py is voice based control
+
+test.py is for quickly test your prompt
+
 ## Before the Start:
 ### Set up the Wi-Fi Hotspot
 Create a Wi-Fi hotspot with the following SSID and password. Make sure the Wi-Fi band is **2.4G**
