@@ -1,6 +1,6 @@
 # myCobot-320-random-position-grabbing-task-YOLOv5s
 
-A demo video: 
+Demo video: https://www.youtube.com/watch?v=ElcOFTFr0Zg&ab_channel=dalong
 
 Using myCobot-320 to grab an object in the area of camera detection
 
