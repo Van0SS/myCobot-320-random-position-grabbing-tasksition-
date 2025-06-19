@@ -29,13 +29,13 @@ import json
 import os
 import signal
 import sys
-import threading
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 from pymycobot import MyCobot280
+from ultralytics import YOLO
 
 # Shared robot pose targets
 from robot_constants import TARGET_Z, TARGET_ORIENTATION
@@ -76,75 +76,210 @@ def convert_camera_to_robot(camera_coord: tuple[float, float], H: np.ndarray) ->
 
 global_target: tuple[float, float] | None = None  # shared between threads
 confirm_follow = False
-_target_lock = threading.Lock()
+selected_object_idx = 0  # index of selected object to pick
+detected_objects = []  # list of detected objects
+fast_mode = False  # toggle for movement speed
+selected_object_class = None  # class name of the selected object to follow
 
-def image_processing_thread(H: np.ndarray, cam_index: int):
-    global global_target, confirm_follow
+def run_vision_processing(H: np.ndarray, cam_index: int):
+    """Run vision processing in main thread with robot control integration."""
+    global global_target, confirm_follow, selected_object_idx, detected_objects, fast_mode, selected_object_class
 
     cap = cv2.VideoCapture(cam_index)
     if not cap.isOpened():
         print(f"[ERR] Unable to open camera index {cam_index}")
-        confirm_follow = True
-        return
+        return None
 
-    # HSV range for yellow (tweak if lighting differs)
-    lower_yellow = np.array([20, 100, 100])
-    upper_yellow = np.array([30, 255, 255])
+    # Initialize YOLOv11n model
+    try:
+        model = YOLO('yolo11n.pt')  # Using YOLOv11n as it's the latest nano model
+        print("[INFO] YOLOv11n model loaded successfully")
+    except Exception as exc:
+        print(f"[ERR] Failed to load YOLO model: {exc}")
+        return None
 
-    display_ok = True  # OpenCV imshow may fail on macOS when used from a non-main thread
+    window_name = "Object Detection - myCobot Vision"
+    cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
+    
+    print("\nKeyboard controls:")
+    print("  ENTER  - start following selected object")
+    print("  F      - toggle FAST/SLOW movement mode")
+    print("  q      - quit without picking")
+    print("  ESC    - emergency abort (releases all servos)")
+    print("  UP/DOWN - select different detected objects")
+    print("  SPACE  - cycle through objects")
+    print(f"\n[INFO] Movement mode: {'FAST' if fast_mode else 'SLOW'} (press F to toggle)")
+    print("[INFO] Select an object first, then press ENTER to start following")
+    
+    # Robot movement parameters
+    pick_z = TARGET_Z
+    pick_orientation = TARGET_ORIENTATION.copy()
+    
+    # Speed settings: slow by default, fast on toggle
+    if fast_mode:
+        speed = 100
+        max_step = 80.0  # mm per iteration
+        threshold = 0.5  # mm
+    else:
+        speed = 30   # Slow speed
+        max_step = 20.0  # mm per iteration - smaller steps
+        threshold = 2.0  # mm - larger threshold to reduce jitter
+    
+    last_sent: tuple[float, float] | None = None
 
     while not confirm_follow:
         ret, frame = cap.read()
         if not ret:
-            print("[ERR] Unable to read frame, exiting image thread…")
+            print("[ERR] Unable to read frame, exiting vision processing…")
             break
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(largest) > 500:
-                x, y, w, h = cv2.boundingRect(largest)
-                cx, cy = x + w // 2, y + h // 2
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
-                cv2.putText(frame, f"({cx}, {cy})", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-                robot_xy = convert_camera_to_robot((cx, cy), H)
-                with _target_lock:
-                    global_target = robot_xy
-
-        if display_ok:
-            try:
-                cv2.imshow("Yellow Object", frame)
-                cv2.imshow("Mask", mask)
-            except cv2.error as exc:
-                # Likely running headless or imshow from thread not supported.
-                print("[WARN] cv2.imshow failed (", exc, ") — switching to headless mode.")
-                display_ok = False
-
-                # Spawn a helper thread waiting for Enter in the terminal.
-                def _stdin_wait():  # noqa: D401
-                    input("[HEADLESS] Press Enter in the terminal to confirm target and start pick-and-place…\n")
-                    global confirm_follow  # noqa: WPS503
-                    confirm_follow = True
-
-                threading.Thread(target=_stdin_wait, daemon=True).start()
-
-        key = cv2.waitKey(1) & 0xFF if display_ok else 255
-        if key in (13, ord("q")):
+        # Run YOLO detection
+        results = model(frame, verbose=False)
+        detected_objects = []
+        
+        # Process detections
+        for result in results:
+            boxes = result.boxes
+            if boxes is not None:
+                for i, box in enumerate(boxes):
+                    # Get bounding box coordinates
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    confidence = box.conf[0].cpu().numpy()
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = model.names[class_id]
+                    
+                    # Filter for reasonable confidence
+                    if confidence > 0.5:
+                        cx = int((x1 + x2) / 2)
+                        cy = int((y1 + y2) / 2)
+                        
+                        detected_objects.append({
+                            'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                            'center': (cx, cy),
+                            'confidence': confidence,
+                            'class_name': class_name,
+                            'class_id': class_id
+                        })
+        
+        # Only track target coordinates for display, don't move robot yet
+        target_xy = None
+        if detected_objects and selected_object_idx < len(detected_objects):
+            selected_obj = detected_objects[selected_object_idx]
+            cx, cy = selected_obj['center']
+            target_xy = convert_camera_to_robot((cx, cy), H)
+            # Store target but don't move robot until user confirms with ENTER
+        
+        # Draw all detected objects
+        for i, obj in enumerate(detected_objects):
+            x1, y1, x2, y2 = obj['bbox']
+            cx, cy = obj['center']
+            confidence = obj['confidence']
+            class_name = obj['class_name']
+            
+            # Highlight selected object
+            if i == selected_object_idx:
+                color = (0, 255, 0)  # Green for selected
+                thickness = 3
+            else:
+                color = (255, 0, 0)  # Blue for unselected
+                thickness = 2
+            
+            # Draw bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+            
+            # Draw center point
+            cv2.circle(frame, (cx, cy), 5, color, -1)
+            
+            # Draw label
+            label = f"{class_name} {confidence:.2f}"
+            if i == selected_object_idx:
+                label += " [SELECTED]"
+            
+            # Calculate text size for background
+            (text_width, text_height), baseline = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+            )
+            
+            # Draw background rectangle for text
+            cv2.rectangle(
+                frame,
+                (x1, y1 - text_height - baseline - 5),
+                (x1 + text_width, y1),
+                color,
+                -1
+            )
+            
+            # Draw text
+            cv2.putText(
+                frame, label, (x1, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2
+            )
+        
+        # Draw instructions
+        mode_str = "FAST" if fast_mode else "SLOW"
+        instructions = [
+            f"Controls: ENTER=follow, F=speed({mode_str}), q=quit, ESC=abort",
+            f"Objects detected: {len(detected_objects)}",
+            f"Selected: {selected_object_idx + 1}/{len(detected_objects)}" if detected_objects else "No objects",
+            "Press ENTER to start following selected object"
+        ]
+        
+        for i, instruction in enumerate(instructions):
+            y_pos = frame.shape[0] - 60 + (i * 20)
+            cv2.putText(
+                frame, instruction, (10, y_pos),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1
+            )
+        
+        # Show the frame
+        cv2.imshow(window_name, frame)
+        
+        # Handle keyboard input
+        key = cv2.waitKey(30) & 0xFF  # Increased wait time for better responsiveness
+        if key == 13:  # ENTER - start following selected object
+            if detected_objects and target_xy is not None:
+                confirm_follow = True
+                selected_object_class = detected_objects[selected_object_idx]['class_name']
+                print(f"\n[INFO] Starting to follow: {selected_object_class}")
+                global_target = target_xy
+                last_sent = target_xy  # Initialize tracking position
+            else:
+                print("[WARN] No objects detected to follow")
+                global_target = None
+        elif key == ord('q'):
+            print("\n[INFO] Quitting without picking")
             confirm_follow = True
+            global_target = None
+        elif key == 27:  # ESC - emergency abort
+            print("\n[WARN] Emergency abort - releasing servos")
+            confirm_follow = True
+            global_target = None
+        elif key == ord('f') or key == ord('F'):  # F - toggle fast mode
+            fast_mode = not fast_mode
+            mode_str = "FAST" if fast_mode else "SLOW"
+            print(f"[INFO] Switched to {mode_str} mode")
+        elif key == 82 or key == 0:  # UP arrow (key codes can vary)
+            if detected_objects and selected_object_idx > 0:
+                selected_object_idx -= 1
+                print(f"[INFO] Selected: {detected_objects[selected_object_idx]['class_name']}")
+        elif key == 84 or key == 1:  # DOWN arrow
+            if detected_objects and selected_object_idx < len(detected_objects) - 1:
+                selected_object_idx += 1
+                print(f"[INFO] Selected: {detected_objects[selected_object_idx]['class_name']}")
+        elif key == 32:  # SPACE - cycle through objects
+            if detected_objects:
+                selected_object_idx = (selected_object_idx + 1) % len(detected_objects)
+                print(f"[INFO] Selected: {detected_objects[selected_object_idx]['class_name']}")
 
     cap.release()
-    if display_ok:
-        cv2.destroyAllWindows()
+    cv2.destroyAllWindows()
+    return last_sent
 
 
 # ------------------------------ Main logic -------------------------------- #
 
 def main():  # noqa: C901  # complexity OK for script level
+    global fast_mode, selected_object_class  # Access global variables
     parser = argparse.ArgumentParser(description="Yellow-object follow and pick for myCobot-280")
     parser.add_argument("--port", default=os.getenv("MYCOBOT_PORT", "/dev/ttyUSB0"), help="Serial port, e.g. /dev/ttyUSB0 or COM3")
     parser.add_argument("--baud", type=int, default=int(os.getenv("MYCOBOT_BAUD", 115200)), help="Baud rate")
@@ -162,7 +297,7 @@ def main():  # noqa: C901  # complexity OK for script level
         sys.exit(1)
 
     # Graceful exit on Ctrl-C
-    def _handle_sigint(_sig, _frame):  # noqa: D401
+    def _handle_sigint(_sig, _frame):  # noqa: D401, ARG001
         print("\n[INFO] SIGINT received — exiting (servos remain enabled)…")
         sys.exit(0)
 
@@ -182,7 +317,7 @@ def main():  # noqa: C901  # complexity OK for script level
 
     home_angles = [0, 0, 0, 0, 0, 0]
     print("[INFO] Moving to home position …")
-    mc.send_angles(home_angles, 30)
+    mc.send_angles(home_angles, 50)  # Slightly faster for initial positioning
     time.sleep(2.5)
 
     # Gripper already opened above; no need to repeat unless desired.
@@ -193,42 +328,180 @@ def main():  # noqa: C901  # complexity OK for script level
     pick_orientation = TARGET_ORIENTATION.copy()  # roll, pitch, yaw
     speed = 100
 
-    # Start vision thread
-    img_thread = threading.Thread(target=image_processing_thread, args=(H, args.cam_index), daemon=True)
-    img_thread.start()
+    # Run vision processing in main thread
+    last_sent = run_vision_processing(H, args.cam_index)
 
-    last_sent: tuple[float, float] | None = None
-    threshold = 0.5  # mm
-    max_step = 80.0  # mm per iteration
-
-    try:
-        while not confirm_follow:
-            with _target_lock:
-                target_xy = global_target
-            if target_xy is not None:
-                if last_sent is None:
-                    last_sent = target_xy
-                dx = target_xy[0] - last_sent[0]
-                dy = target_xy[1] - last_sent[1]
-                if abs(dx) >= threshold or abs(dy) >= threshold:
-                    inc_x = float(max(-max_step, min(max_step, dx)))
-                    inc_y = float(max(-max_step, min(max_step, dy)))
-                    new_x = last_sent[0] + inc_x
-                    new_y = last_sent[1] + inc_y
-                    coords = [new_x, new_y, pick_z, *pick_orientation]
-                    print(f"[INFO] Moving to coords: {coords}")
-                    mc.send_coords(coords, speed, 1)
-                    last_sent = (new_x, new_y)
-            time.sleep(0.01)
-    finally:
-        img_thread.join()
-
-    if last_sent is None:
-        print("[WARN] No target tracked; exiting …")
+    # Check if we should abort or if no target was tracked
+    if global_target is None:
+        if last_sent is None:
+            print("[WARN] No target selected; exiting …")
+        else:
+            print("[INFO] Operation aborted by user")
         return
+    
+    # Initialize last_sent with global_target if it's None
+    if last_sent is None:
+        last_sent = global_target
+
+    # Now start following the selected object
+    print("[INFO] Starting object following mode...")
+    
+    # Robot movement parameters for following phase
+    pick_z = TARGET_Z
+    pick_orientation = TARGET_ORIENTATION.copy()
+    
+    # Use current speed settings
+    if fast_mode:
+        speed = 100
+        max_step = 80.0  # mm per iteration
+        threshold = 0.5  # mm
+        print("[INFO] Following in FAST mode")
+    else:
+        speed = 30   # Slow speed
+        max_step = 20.0  # mm per iteration
+        threshold = 2.0  # mm
+        print("[INFO] Following in SLOW mode")
+    
+    # Initialize YOLO model for following phase
+    try:
+        model = YOLO('yolo11n.pt')
+    except Exception as exc:
+        print(f"[ERR] Failed to load YOLO model for following: {exc}")
+        return
+    
+    # Start following the object
+    cap = cv2.VideoCapture(args.cam_index)
+    if not cap.isOpened():
+        print(f"[ERR] Unable to open camera for following")
+        return
+    
+    following_window = "Following Object"
+    cv2.namedWindow(following_window, cv2.WINDOW_AUTOSIZE)
+    
+    mode_str = "FAST" if fast_mode else "SLOW"
+    print(f"\nFollowing mode controls ({mode_str} speed):")
+    print("  ENTER  - stop following and pick object")
+    print("  F      - toggle FAST/SLOW movement speed")
+    print("  q      - quit following")
+    print("  ESC    - emergency abort")
+    
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("[ERR] Unable to read frame during following")
+                break
+            
+            # Run YOLO detection
+            results = model(frame, verbose=False)
+            detected_objects = []
+            
+            # Process detections
+            for result in results:
+                boxes = result.boxes
+                if boxes is not None:
+                    for box in boxes:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        confidence = box.conf[0].cpu().numpy()
+                        class_id = int(box.cls[0].cpu().numpy())
+                        class_name = model.names[class_id]
+                        
+                        if confidence > 0.5:
+                            cx = int((x1 + x2) / 2)
+                            cy = int((y1 + y2) / 2)
+                            
+                            detected_objects.append({
+                                'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                                'center': (cx, cy),
+                                'confidence': confidence,
+                                'class_name': class_name,
+                                'class_id': class_id
+                            })
+            
+            # Find the best matching object to follow (same class as selected)
+            target_xy = None
+            best_obj = None
+            if detected_objects and selected_object_class:
+                # Find objects matching the selected class
+                matching_objects = [obj for obj in detected_objects if obj['class_name'] == selected_object_class]
+                if matching_objects:
+                    # Follow the first matching object (could be enhanced to find closest)
+                    best_obj = matching_objects[0]
+                    cx, cy = best_obj['center']
+                    target_xy = convert_camera_to_robot((cx, cy), H)
+                else:
+                    print(f"[WARN] No {selected_object_class} objects detected")
+                
+                # Robot following logic
+                if target_xy is not None and last_sent is not None:
+                    dx = target_xy[0] - last_sent[0]
+                    dy = target_xy[1] - last_sent[1]
+                    if abs(dx) >= threshold or abs(dy) >= threshold:
+                        inc_x = float(max(-max_step, min(max_step, dx)))
+                        inc_y = float(max(-max_step, min(max_step, dy)))
+                        new_x = last_sent[0] + inc_x
+                        new_y = last_sent[1] + inc_y
+                        coords = [new_x, new_y, pick_z, *pick_orientation]
+                        print(f"[INFO] Following to: {coords}")
+                        mc.send_coords(coords, speed, 1)
+                        last_sent = (new_x, new_y)
+                elif target_xy is not None and last_sent is None:
+                    # First movement - go directly to target
+                    coords = [target_xy[0], target_xy[1], pick_z, *pick_orientation]
+                    print(f"[INFO] Initial move to: {coords}")
+                    mc.send_coords(coords, speed, 1)
+                    last_sent = target_xy
+            
+            # Draw tracking visualization
+            if best_obj:
+                x1, y1, x2, y2 = best_obj['bbox']
+                cx, cy = best_obj['center']
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                cv2.circle(frame, (cx, cy), 8, (0, 0, 255), -1)
+                cv2.putText(frame, f"FOLLOWING: {best_obj['class_name']}", 
+                           (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Draw status with speed mode and target class
+            mode_str = "FAST" if fast_mode else "SLOW"
+            cv2.putText(frame, f"FOLLOWING {selected_object_class} ({mode_str}) - ENTER=pick, F=speed, q=quit", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            cv2.imshow(following_window, frame)
+            
+            # Handle keyboard input
+            key = cv2.waitKey(30) & 0xFF
+            if key == 13:  # ENTER - proceed to pick
+                print("[INFO] Stopping following, proceeding to pick...")
+                break
+            elif key == ord('f') or key == ord('F'):  # F - toggle fast mode during following
+                fast_mode = not fast_mode
+                if fast_mode:
+                    speed = 100
+                    max_step = 80.0
+                    threshold = 0.5
+                    print("[INFO] Switched to FAST mode during following")
+                else:
+                    speed = 30
+                    max_step = 20.0
+                    threshold = 2.0
+                    print("[INFO] Switched to SLOW mode during following")
+            elif key == ord('q'):
+                print("[INFO] Quitting following mode")
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+            elif key == 27:  # ESC
+                print("[WARN] Emergency abort during following")
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+    
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
     # Pick & place sequence
-    pick_coords = [last_sent[0], last_sent[1], pick_z, *pick_orientation]
+    pick_coords = [last_sent[0], last_sent[1], TARGET_Z, *TARGET_ORIENTATION]
     print("[INFO] Final pick coords:", pick_coords)
     time.sleep(0.5)
 
@@ -236,14 +509,14 @@ def main():  # noqa: C901  # complexity OK for script level
     mc.set_gripper_state(1, 100)
     time.sleep(1.5)
 
-    ascend_coords = [pick_coords[0], pick_coords[1], pick_z + 50, *pick_orientation]
+    ascend_coords = [pick_coords[0], pick_coords[1], TARGET_Z + 50, *TARGET_ORIENTATION]
     print("[INFO] Lifting object …")
     mc.send_coords(ascend_coords, speed, 1)
     time.sleep(2)
 
     place_coords = [-200.0, 80.0, 170.0, -180.0, -6.0, 0.0]  # yaw 0° to match pick_orientation
     print("[INFO] Moving to place coords …")
-    mc.send_coords(place_coords, speed, 1)
+    mc.send_coords(place_coords, 50, 1)  # Use moderate speed for placement
     time.sleep(2)
 
     print("[INFO] Opening gripper to release …")
@@ -251,7 +524,7 @@ def main():  # noqa: C901  # complexity OK for script level
     time.sleep(1)
 
     print("[INFO] Returning home …")
-    mc.send_angles(home_angles, 30)
+    mc.send_angles(home_angles, 50)  # Slightly faster for final return
     time.sleep(2.5)
 
     print("[INFO] Closing gripper (idle state) …")
