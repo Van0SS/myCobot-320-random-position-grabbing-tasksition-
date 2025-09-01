@@ -90,10 +90,10 @@ def run_vision_processing(H: np.ndarray, cam_index: int):
         print(f"[ERR] Unable to open camera index {cam_index}")
         return None
 
-    # Initialize YOLOv11n model
+    # Initialize yolo11x model
     try:
-        model = YOLO('yolo11n.pt')  # Using YOLOv11n as it's the latest nano model
-        print("[INFO] YOLOv11n model loaded successfully")
+        model = YOLO('yolo11x.pt')  # Using yolo11x as it's the latest model
+        print("[INFO] yolo11x model loaded successfully")
     except Exception as exc:
         print(f"[ERR] Failed to load YOLO model: {exc}")
         return None
@@ -364,7 +364,7 @@ def main():  # noqa: C901  # complexity OK for script level
     
     # Initialize YOLO model for following phase
     try:
-        model = YOLO('yolo11n.pt')
+        model = YOLO('yolo11x.pt')
     except Exception as exc:
         print(f"[ERR] Failed to load YOLO model for following: {exc}")
         return
